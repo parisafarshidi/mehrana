@@ -8,8 +8,8 @@ import {
   timingSafeEqual,
   createHash,
 } from 'node:crypto';
-import { mkdirSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { existsSync, mkdirSync, readFileSync, statSync } from 'node:fs';
+import { dirname, extname, resolve, sep } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
 const dbPath = resolve(process.env.MEHRANA_DB_PATH || 'server/data/mehrana.sqlite');
@@ -43,6 +43,67 @@ db.exec(`
     expires_at INTEGER NOT NULL
   );
 `);
+
+
+const DIST_DIR = resolve('dist');
+const MIME_TYPES = {
+  '.css': 'text/css; charset=utf-8',
+  '.html': 'text/html; charset=utf-8',
+  '.ico': 'image/x-icon',
+  '.jpeg': 'image/jpeg',
+  '.jpg': 'image/jpeg',
+  '.js': 'text/javascript; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.png': 'image/png',
+  '.svg': 'image/svg+xml',
+  '.txt': 'text/plain; charset=utf-8',
+  '.webp': 'image/webp',
+  '.woff': 'font/woff',
+  '.woff2': 'font/woff2',
+};
+
+function serveStatic(req, res, url) {
+  if (!['GET', 'HEAD'].includes(req.method) || url.pathname.startsWith('/api/')) {
+    return false;
+  }
+
+  let pathname;
+  try {
+    pathname = decodeURIComponent(url.pathname);
+  } catch {
+    return false;
+  }
+
+  const requestedPath = resolve(DIST_DIR, pathname.replace(/^\/+/, ''));
+  if (!requestedPath.startsWith(DIST_DIR + sep) && requestedPath !== DIST_DIR) {
+    return false;
+  }
+
+  let filePath = requestedPath;
+  if (existsSync(filePath) && statSync(filePath).isDirectory()) {
+    filePath = resolve(filePath, 'index.html');
+  }
+
+  if (!existsSync(filePath) || !statSync(filePath).isFile()) {
+    if (extname(pathname)) return false;
+    filePath = resolve(DIST_DIR, 'index.html');
+  }
+
+  if (!existsSync(filePath) || !statSync(filePath).isFile()) return false;
+
+  const content = readFileSync(filePath);
+  const contentType = MIME_TYPES[extname(filePath).toLowerCase()] || 'application/octet-stream';
+  const isHtml = contentType.startsWith('text/html');
+
+  res.writeHead(200, {
+    'content-type': contentType,
+    'content-length': content.length,
+    'cache-control': isHtml ? 'no-cache' : 'public, max-age=31536000, immutable',
+    'x-content-type-options': 'nosniff',
+  });
+  res.end(req.method === 'HEAD' ? undefined : content);
+  return true;
+}
 
 const now = () => Date.now();
 
@@ -789,6 +850,8 @@ const server = createServer(async (req, res) => {
       return sendJson(res, 200, { ok: true });
     }
 
+    if (serveStatic(req, res, url)) return;
+
     return sendJson(res, 404, {
       error: 'مسیر پیدا نشد.',
     });
@@ -806,10 +869,9 @@ const server = createServer(async (req, res) => {
   }
 });
 
-const port = Number(process.env.API_PORT || 8787);
+const port = Number(process.env.PORT || process.env.API_PORT || 8787);
+const host = process.env.API_HOST || '0.0.0.0';
 
-server.listen(
-  port,
-  process.env.API_HOST || '127.0.0.1',
-  () => console.info(`Mehrana API listening on http://127.0.0.1:${port}`)
-);
+server.listen(port, host, () => {
+  console.info(`Mehrana server listening on ${host}:${port}`);
+});

@@ -10,7 +10,8 @@
     "dev:api": "node server/index.js",
     "db:migrate": "node server/db/migrate.js",
     "admin:create": "node scripts/create-admin.js",
-    "seo:check": "node scripts/check-seo.js"
+    "seo:check": "node scripts/check-seo.js",
+    "start": "node server/index.js"
   },
   "dependencies": {
     "@vitejs/plugin-react": "^4.3.4",
@@ -20,5 +21,8 @@
     "react-router-dom": "^6.28.0",
     "lucide-react": "^0.468.0"
   },
-  "devDependencies": {}
+  "devDependencies": {},
+  "engines": {
+    "node": ">=22.5.0"
+  }
 }
