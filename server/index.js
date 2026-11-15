@@ -388,7 +388,15 @@ const server = createServer(async (req, res) => {
       demoLoginAttempts.delete(ip);
       const id = randomUUID();
       const phone = `+98999${String(randomInt(0, 10_000_000)).padStart(7, '0')}`;
-      db.prepare('INSERT INTO users(id, phone, created_at) VALUES(?,?,?)').run(id, phone, stamp);
+      const demoData = {
+        children: [{ id: 'demo-child', name: 'کودک نمونه', birth: '2025-03-12', feeding: 'تغذیه ترکیبی' }],
+        active: 'demo-child',
+        records: [], growth: [], plans: [], development: [], sleep: [],
+        reminders: [], activities: [], healthRecords: [], familyMembers: [],
+        subscription: { plan: 'free', status: 'inactive' }
+      };
+      db.prepare('INSERT INTO users(id, phone, data_json, created_at) VALUES(?,?,?,?)')
+        .run(id, phone, JSON.stringify(demoData), stamp);
 
       const token = randomBytes(32).toString('base64url');
       const tokenHash = createHash('sha256').update(token).digest('hex');
