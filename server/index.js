@@ -117,6 +117,7 @@ function asciiDigits(value) {
 }
 
 const otpRequestTimes = new Map();
+const demoLoginAttempts = new Map();
 
 const safeEqual = (a, b) => {
   const left = Buffer.from(a);
@@ -363,6 +364,52 @@ const server = createServer(async (req, res) => {
   }
 
   try {
+    if (req.method === 'POST' && url.pathname === '/api/auth/demo-login') {
+      const enabled = process.env.MEHRANA_DEMO_LOGIN === 'true';
+      const expectedCode = process.env.MEHRANA_DEMO_ACCESS_CODE || '';
+      if (!enabled || expectedCode.length < 12) {
+        return sendJson(res, 404, { error: 'ورود آزمایشی فعال نیست.' });
+      }
+
+      const ip = req.socket?.remoteAddress || 'unknown';
+      const stamp = now();
+      const attempts = (demoLoginAttempts.get(ip) || []).filter(time => stamp - time < 15 * 60_000);
+      if (attempts.length >= 5) {
+        return sendJson(res, 429, { error: 'تعداد تلاش‌ها زیاد است؛ ۱۵ دقیقه دیگر دوباره امتحان کن.' });
+      }
+
+      const body = await readJson(req);
+      if (!safeEqual(String(body.accessCode || ''), expectedCode)) {
+        attempts.push(stamp);
+        demoLoginAttempts.set(ip, attempts);
+        return sendJson(res, 401, { error: 'کد دسترسی آزمایشی درست نیست.' });
+      }
+
+      demoLoginAttempts.delete(ip);
+      const id = randomUUID();
+      const phone = `+98999${String(randomInt(0, 10_000_000)).padStart(7, '0')}`;
+      const demoData = {
+        children: [{ id: 'demo-child', name: 'کودک نمونه', birth: '2025-03-12', feeding: 'تغذیه ترکیبی' }],
+        active: 'demo-child',
+        records: [], growth: [], plans: [], development: [], sleep: [],
+        reminders: [], activities: [], healthRecords: [], familyMembers: [],
+        subscription: { plan: 'free', status: 'inactive' }
+      };
+      db.prepare('INSERT INTO users(id, phone, data_json, created_at) VALUES(?,?,?,?)')
+        .run(id, phone, JSON.stringify(demoData), stamp);
+
+      const token = randomBytes(32).toString('base64url');
+      const tokenHash = createHash('sha256').update(token).digest('hex');
+      const expiry = stamp + 12 * 60 * 60_000;
+      db.prepare('INSERT INTO sessions(token_hash,user_id,expires_at) VALUES(?,?,?)').run(tokenHash, id, expiry);
+
+      return sendJson(res, 200, {
+        user: { id, phone, demo: true },
+        demo: true,
+        message: 'ورود آزمایشی فعال شد.'
+      }, { 'set-cookie': setSessionCookie(token) });
+    }
+
     const contentTypes = ['food','breastfeeding','activity','milestone','sleep_guide','reminder'];
     if (req.method === 'GET' && url.pathname === '/api/content') {
       const type = url.searchParams.get('type') || '';
