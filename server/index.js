@@ -74,7 +74,7 @@ function serveStatic(req, res, url) {
     return false;
   }
 
-  const requestedPath = resolve(DIST_DIR, `.\u0024{pathname.replace(/^\\/+/, '')}`);
+  const requestedPath = resolve(DIST_DIR, '.' + pathname.replace(/^\\/+/, ''));
   if (!requestedPath.startsWith(DIST_DIR + sep) && requestedPath !== DIST_DIR) {
     return false;
   }
