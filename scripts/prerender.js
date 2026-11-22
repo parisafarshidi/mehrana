@@ -5,7 +5,7 @@ import { openDatabase } from '../server/db/database.js';
 
 const root = resolve(import.meta.dirname, '..');
 const dist = resolve(root, 'dist');
-const base = (process.env.SITE_URL || 'https://mehrana.example').replace(/\/$/, ''); // Set SITE_URL to the real production domain before deployment.
+const base = (process.env.SITE_URL || 'https://mehranaman.ir').replace(/\/$/, ''); // Set SITE_URL to the real production domain before deployment.
 const template = await readFile(resolve(dist, 'index.html'), 'utf8');
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const link = (path, label) => `<a href="${esc(path)}">${esc(label)}</a>`;
