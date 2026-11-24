@@ -69,6 +69,76 @@ function serveStatic(req, res, url) {
 
   let pathname;
   try {
+    if (req.method === 'POST' && url.pathname === '/api/auth/demo-login') {
+          const enabled = process.env.MEHRANA_DEMO_LOGIN === 'true';
+          const expectedCode = process.env.MEHRANA_DEMO_ACCESS_CODE || '';
+          if (!enabled || expectedCode.length < 12) {
+            return sendJson(res, 404, { error: 'ورود آزمایشی فعال نیست.' });
+          }
+    
+          const ip = req.socket?.remoteAddress || 'unknown';
+          const stamp = now();
+          const attempts = (demoLoginAttempts.get(ip) || []).filter(time => stamp - time < 15 * 60_000);
+          if (attempts.length >= 5) {
+            return sendJson(res, 429, { error: 'تعداد تلاش‌ها زیاد است؛ ۱۵ دقیقه دیگر دوباره امتحان کن.' });
+          }
+    
+          const body = await readJson(req);
+          if (!safeEqual(String(body.accessCode || ''), expectedCode)) {
+            attempts.push(stamp);
+            demoLoginAttempts.set(ip, attempts);
+            return sendJson(res, 401, { error: 'کد دسترسی آزمایشی درست نیست.' });
+          }
+    
+          demoLoginAttempts.delete(ip);
+          const id = randomUUID();
+          const phone = `+98999${String(randomInt(0, 10_000_000)).padStart(7, '0')}`;
+          const demoData = {
+            children: [{ id: 'demo-child', name: 'کودک نمونه', birth: '2025-03-12', feeding: 'تغذیه ترکیبی' }],
+            active: 'demo-child',
+            records: [], growth: [], plans: [], development: [], sleep: [],
+            reminders: [], activities: [], healthRecords: [], familyMembers: [],
+            subscription: { plan: 'free', status: 'inactive' }
+          };
+          db.prepare('INSERT INTO users(id, phone, data_json, created_at) VALUES(?,?,?,?)')
+            .run(id, phone, JSON.stringify(demoData), stamp);
+    
+          const token = randomBytes(32).toString('base64url');
+          const tokenHash = createHash('sha256').update(token).digest('hex');
+          const expiry = stamp + 12 * 60 * 60_000;
+          db.prepare('INSERT INTO sessions(token_hash,user_id,expires_at) VALUES(?,?,?)').run(tokenHash, id, expiry);
+    
+          return sendJson(res, 200, {
+            user: { id, phone, demo: true },
+            demo: true,
+            message: 'ورود آزمایشی فعال شد.'
+          }, { 'set-cookie': setSessionCookie(token) });
+        }
+    
+        const contentTypes = ['food','breastfeeding','activity','milestone','sleep_guide','reminder'];
+        if (req.method === 'GET' && url.pathname === '/api/content') {
+          const type = url.searchParams.get('type') || '';
+          if (!contentTypes.includes(type)) return sendJson(res, 400, { error: 'نوع محتوا معتبر نیست.' });
+          const items = db.prepare(`SELECT id,content_type AS type,title,slug,summary,category,min_age_months AS minAgeMonths,max_age_months AS maxAgeMonths,tags_json AS tagsJson,author_name AS authorName,reviewer_name AS reviewerName,source_title AS sourceTitle,source_pages AS sourcePages,reviewed_at AS reviewedAt,sort_order AS sortOrder,published_at AS publishedAt FROM feature_content WHERE content_type=? AND status='published' ORDER BY sort_order, min_age_months, title`).all(type);
+          return sendJson(res, 200, { items: items.map(x => ({...x,tags:JSON.parse(x.tagsJson||'[]')})) }, { 'cache-control': 'public, max-age=60, s-maxage=300' });
+        }
+        const publicContentMatch = url.pathname.match(/^\/api\/content\/(food|breastfeeding|activity|milestone|sleep_guide|reminder)\/([a-z0-9-]+)$/);
+        if (req.method === 'GET' && publicContentMatch) {
+          const item = db.prepare(`SELECT id,content_type AS type,title,slug,summary,body,category,min_age_months AS minAgeMonths,max_age_months AS maxAgeMonths,tags_json AS tagsJson,author_name AS authorName,reviewer_name AS reviewerName,source_notes AS sourceNotes,source_title AS sourceTitle,source_pages AS sourcePages,reviewed_at AS reviewedAt,sort_order AS sortOrder,published_at AS publishedAt FROM feature_content WHERE content_type=? AND slug=? AND status='published'`).get(publicContentMatch[1], publicContentMatch[2]);
+          return item ? sendJson(res, 200, { item: {...item,tags:JSON.parse(item.tagsJson||'[]')} }, { 'cache-control': 'public, max-age=60, s-maxage=300' }) : sendJson(res, 404, { error: 'محتوا پیدا نشد.' });
+        }
+        if (req.method === 'GET' && url.pathname === '/api/articles') {
+          const articles = db.prepare(`SELECT title,slug,excerpt,category,meta_title AS metaTitle,meta_description AS metaDescription,author_name AS authorName,reviewer_name AS reviewerName,published_at AS publishedAt
+            FROM articles WHERE status='published' ORDER BY published_at DESC`).all();
+          return sendJson(res, 200, { articles }, { 'cache-control': 'public, max-age=60, s-maxage=300' });
+        }
+        const publicArticleMatch = url.pathname.match(/^\/api\/articles\/([a-z0-9-]+)$/);
+        if (req.method === 'GET' && publicArticleMatch) {
+          const article = db.prepare(`SELECT title,slug,excerpt,content,category,meta_title AS metaTitle,meta_description AS metaDescription,author_name AS authorName,reviewer_name AS reviewerName,source_notes AS sourceNotes,published_at AS publishedAt
+            FROM articles WHERE slug=? AND status='published'`).get(publicArticleMatch[1]);
+          return article ? sendJson(res, 200, { article }, { 'cache-control': 'public, max-age=60, s-maxage=300' }) : sendJson(res, 404, { error: 'مقاله پیدا نشد.' });
+        }
+
     pathname = decodeURIComponent(url.pathname);
   } catch {
     return false;
@@ -222,6 +292,18 @@ function cookieValue(req, key) {
     : '';
 }
 
+function consultationThread(req) {
+  const token = cookieValue(req, 'mh_consultation_thread');
+  if (!token) return null;
+  const tokenHash = createHash('sha256').update(token).digest('hex');
+  return db.prepare('SELECT id,name,phone,status FROM consultation_requests WHERE thread_token_hash=?').get(tokenHash) || null;
+}
+
+function setConsultationThreadCookie(token) {
+  const secure = process.env.NODE_ENV === 'production' ? '; Secure' : '';
+  return `mh_consultation_thread=${encodeURIComponent(token)}; HttpOnly; SameSite=Strict; Path=/api/consultations; Max-Age=7776000${secure}`;
+}
+
 function sessionUser(req) {
   const token = cookieValue(req, 'mh_session');
 
@@ -356,6 +438,9 @@ function validateArticle(body) {
   };
 }
 
+const consultationAttemptTimes = new Map();
+const consultationMessageTimes = new Map();
+
 const server = createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
 
@@ -364,52 +449,57 @@ const server = createServer(async (req, res) => {
   }
 
   try {
-    if (req.method === 'POST' && url.pathname === '/api/auth/demo-login') {
-      const enabled = process.env.MEHRANA_DEMO_LOGIN === 'true';
-      const expectedCode = process.env.MEHRANA_DEMO_ACCESS_CODE || '';
-      if (!enabled || expectedCode.length < 12) {
-        return sendJson(res, 404, { error: 'ورود آزمایشی فعال نیست.' });
-      }
-
-      const ip = req.socket?.remoteAddress || 'unknown';
-      const stamp = now();
-      const attempts = (demoLoginAttempts.get(ip) || []).filter(time => stamp - time < 15 * 60_000);
-      if (attempts.length >= 5) {
-        return sendJson(res, 429, { error: 'تعداد تلاش‌ها زیاد است؛ ۱۵ دقیقه دیگر دوباره امتحان کن.' });
-      }
-
-      const body = await readJson(req);
-      if (!safeEqual(String(body.accessCode || ''), expectedCode)) {
-        attempts.push(stamp);
-        demoLoginAttempts.set(ip, attempts);
-        return sendJson(res, 401, { error: 'کد دسترسی آزمایشی درست نیست.' });
-      }
-
-      demoLoginAttempts.delete(ip);
-      const id = randomUUID();
-      const phone = `+98999${String(randomInt(0, 10_000_000)).padStart(7, '0')}`;
-      const demoData = {
-        children: [{ id: 'demo-child', name: 'کودک نمونه', birth: '2025-03-12', feeding: 'تغذیه ترکیبی' }],
-        active: 'demo-child',
-        records: [], growth: [], plans: [], development: [], sleep: [],
-        reminders: [], activities: [], healthRecords: [], familyMembers: [],
-        subscription: { plan: 'free', status: 'inactive' }
-      };
-      db.prepare('INSERT INTO users(id, phone, data_json, created_at) VALUES(?,?,?,?)')
-        .run(id, phone, JSON.stringify(demoData), stamp);
-
-      const token = randomBytes(32).toString('base64url');
-      const tokenHash = createHash('sha256').update(token).digest('hex');
-      const expiry = stamp + 12 * 60 * 60_000;
-      db.prepare('INSERT INTO sessions(token_hash,user_id,expires_at) VALUES(?,?,?)').run(tokenHash, id, expiry);
-
-      return sendJson(res, 200, {
-        user: { id, phone, demo: true },
-        demo: true,
-        message: 'ورود آزمایشی فعال شد.'
-      }, { 'set-cookie': setSessionCookie(token) });
+    if (req.method === 'GET' && url.pathname === '/api/consultations/messages') {
+      const thread = consultationThread(req);
+      if (!thread) return sendJson(res, 200, { hasThread: false, messages: [] });
+      const messages = db.prepare(`SELECT sender,message,created_at AS createdAt FROM consultation_messages WHERE request_id=? ORDER BY created_at,id`).all(thread.id);
+      return sendJson(res, 200, { hasThread: true, status: thread.status, messages });
     }
-
+    if (req.method === 'POST' && url.pathname === '/api/consultations/messages') {
+      const thread = consultationThread(req);
+      if (!thread) return sendJson(res, 401, { error: 'گفت‌وگوی فعالی پیدا نشد. از دکمهٔ مشاوره یک درخواست تازه بفرست.' });
+      const stamp = now();
+      const recent = (consultationMessageTimes.get(thread.id) || []).filter(time => time > stamp - 10 * 60_000);
+      if (recent.length >= 25) return sendJson(res, 429, { error: 'پیام‌های زیادی فرستاده‌ای؛ کمی بعد دوباره تلاش کن.' });
+      recent.push(stamp); consultationMessageTimes.set(thread.id, recent);
+      const message = String((await readJson(req)).message || '').trim().slice(0, 3000);
+      if (message.length < 2) return sendJson(res, 400, { error: 'متن پیام را بنویس.' });
+      const createdAt = new Date(stamp).toISOString();
+      db.prepare('INSERT INTO consultation_messages(request_id,sender,message,created_at) VALUES(?,?,?,?)').run(thread.id, 'parent', message, createdAt);
+      db.prepare("UPDATE consultation_requests SET status='new',updated_at=? WHERE id=?").run(createdAt, thread.id);
+      return sendJson(res, 201, { ok: true });
+    }
+    if (req.method === 'POST' && url.pathname === '/api/consultations') {
+      const body = await readJson(req);
+      if (String(body.website || '').trim()) return sendJson(res, 201, { ok: true });
+      const ip = String(req.socket?.remoteAddress || 'unknown');
+      const stamp = now();
+      const attempts = (consultationAttemptTimes.get(ip) || []).filter(time => time > stamp - 60 * 60_000);
+      if (attempts.length >= 5) return sendJson(res, 429, { error: 'تعداد درخواست‌ها زیاد است؛ کمی بعد دوباره تلاش کن.' });
+      attempts.push(stamp); consultationAttemptTimes.set(ip, attempts);
+      if (consultationAttemptTimes.size > 2000) {
+        for (const [key, times] of consultationAttemptTimes) if (!times.some(time => time > stamp - 60 * 60_000)) consultationAttemptTimes.delete(key);
+      }
+      const name = String(body.name || '').trim().replace(/\s+/g, ' ').slice(0, 80);
+      const phone = normalizePhone(body.phone);
+      const topic = String(body.topic || '');
+      const message = String(body.message || '').trim().slice(0, 3000);
+      if (name.length < 2 || !phone || !['family-health','child-growth','mehrana','other'].includes(topic) || message.length < 10 || body.consent !== true) {
+        return sendJson(res, 400, { error: 'نام، شماره همراه معتبر، موضوع و متن سؤال را بررسی کن و رضایت استفاده از شماره را تأیید کن.' });
+      }
+      const createdAt = new Date().toISOString();
+      const token = randomBytes(32).toString('hex');
+      const tokenHash = createHash('sha256').update(token).digest('hex');
+      let requestId;
+      db.exec('BEGIN IMMEDIATE');
+      try {
+        const result = db.prepare(`INSERT INTO consultation_requests(name,phone,topic,message,status,created_at,updated_at,thread_token_hash) VALUES(?,?,?,?, 'new', ?, ?, ?)`).run(name, phone, topic, message, createdAt, createdAt, tokenHash);
+        requestId = Number(result.lastInsertRowid);
+        db.prepare('INSERT INTO consultation_messages(request_id,sender,message,created_at) VALUES(?,?,?,?)').run(requestId, 'parent', message, createdAt);
+        db.exec('COMMIT');
+      } catch (error) { db.exec('ROLLBACK'); throw error; }
+      return sendJson(res, 201, { ok: true, id: requestId }, { 'set-cookie': setConsultationThreadCookie(token) });
+    }
     const contentTypes = ['food','breastfeeding','activity','milestone','sleep_guide','reminder'];
     if (req.method === 'GET' && url.pathname === '/api/content') {
       const type = url.searchParams.get('type') || '';
@@ -574,6 +664,49 @@ const server = createServer(async (req, res) => {
     if (url.pathname.startsWith('/api/admin/')) {
       const admin = adminSession(req);
       if (!admin) return sendJson(res, 401, { error: 'برای دسترسی مدیر ابتدا وارد شو.' });
+      if (req.method === 'GET' && url.pathname === '/api/admin/consultations') {
+        const items = db.prepare(`SELECT id,name,phone,topic,message,status,created_at AS createdAt FROM consultation_requests ORDER BY CASE status WHEN 'new' THEN 0 ELSE 1 END, created_at DESC`).all();
+        writeAudit(req, admin.id, 'admin.consultations_listed', 'consultation_request');
+        return sendJson(res, 200, { items });
+      }
+      const consultationMessagesMatch = url.pathname.match(/^\/api\/admin\/consultations\/(\d+)\/messages$/);
+      if (consultationMessagesMatch && req.method === 'GET') {
+        const id = Number(consultationMessagesMatch[1]);
+        const exists = db.prepare('SELECT 1 FROM consultation_requests WHERE id=?').get(id);
+        if (!exists) return sendJson(res, 404, { error: 'گفت‌وگو پیدا نشد.' });
+        const messages = db.prepare(`SELECT sender,message,created_at AS createdAt FROM consultation_messages WHERE request_id=? ORDER BY created_at,id`).all(id);
+        return sendJson(res, 200, { messages });
+      }
+      if (consultationMessagesMatch && req.method === 'POST') {
+        const id = Number(consultationMessagesMatch[1]);
+        const exists = db.prepare('SELECT 1 FROM consultation_requests WHERE id=?').get(id);
+        if (!exists) return sendJson(res, 404, { error: 'گفت‌وگو پیدا نشد.' });
+        const message = String((await readJson(req)).message || '').trim().slice(0, 3000);
+        if (message.length < 2) return sendJson(res, 400, { error: 'متن پاسخ را بنویس.' });
+        const createdAt = new Date().toISOString();
+        db.prepare('INSERT INTO consultation_messages(request_id,sender,message,created_at) VALUES(?,?,?,?)').run(id, 'admin', message, createdAt);
+        db.prepare("UPDATE consultation_requests SET status='answered',updated_at=? WHERE id=?").run(createdAt, id);
+        writeAudit(req, admin.id, 'admin.consultation_message_sent', 'consultation_request', String(id));
+        return sendJson(res, 201, { ok: true });
+      }
+      const consultationMatch = url.pathname.match(/^\/api\/admin\/consultations\/(\d+)$/);
+      if (consultationMatch && req.method === 'PUT') {
+        const id = Number(consultationMatch[1]);
+        const body = await readJson(req);
+        if (!['new','answered'].includes(body.status)) return sendJson(res, 400, { error: 'وضعیت انتخاب‌شده معتبر نیست.' });
+        const updatedAt = new Date().toISOString();
+        const result = db.prepare('UPDATE consultation_requests SET status=?,updated_at=? WHERE id=?').run(body.status, updatedAt, id);
+        if (!result.changes) return sendJson(res, 404, { error: 'درخواست پیدا نشد.' });
+        writeAudit(req, admin.id, 'admin.consultation_status_updated', 'consultation_request', String(id), { status: body.status });
+        return sendJson(res, 200, { ok: true });
+      }
+      if (consultationMatch && req.method === 'DELETE') {
+        const id = Number(consultationMatch[1]);
+        const result = db.prepare('DELETE FROM consultation_requests WHERE id=?').run(id);
+        if (!result.changes) return sendJson(res, 404, { error: 'درخواست پیدا نشد.' });
+        writeAudit(req, admin.id, 'admin.consultation_deleted', 'consultation_request', String(id));
+        return sendJson(res, 200, { ok: true });
+      }
       if (req.method === 'GET' && url.pathname === '/api/admin/site-content') {
         const type = url.searchParams.get('type') || '';
         if (!['page','banner','menu','category','media'].includes(type)) return sendJson(res,400,{error:'نوع محتوا معتبر نیست.'});
@@ -922,3 +1055,4 @@ const host = process.env.API_HOST || '0.0.0.0';
 server.listen(port, host, () => {
   console.info(`Mehrana server listening on ${host}:${port}`);
 });
+
